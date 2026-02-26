@@ -3,11 +3,10 @@ import numpy as np
 import os
 import webrtcvad
 import queue
-import json
-from vosk import Model, KaldiRecognizer
+from faster_whisper import WhisperModel
 
 class AudioHandler:
-    def __init__(self, wake_word="hey ansar"):
+    def __init__(self, wake_word="hey john"):
         self.wake_word = wake_word.lower()
         
         # Audio configuration
@@ -15,14 +14,8 @@ class AudioHandler:
         self.CHANNELS = 1
         self.CHUNK = 480  # 30ms chunk at 16kHz
         
-        # Load Vosk Model
-        model_path = os.path.join(os.path.dirname(__file__), "venv", "model")
-        if not os.path.exists(model_path):
-             print(f"Error: Vosk model not found at {model_path}. Please download it.")
-        else:
-             self.model = Model(model_path)
-             self.recognizer = KaldiRecognizer(self.model, self.RATE)
-             self.recognizer.SetWords(False)
+        print("Loading Whisper model...")
+        self.model = WhisperModel("tiny.en", device="cpu", compute_type="int8")
              
         # VAD helps us detect when someone is speaking vs silence
         self.vad = webrtcvad.Vad(3) # Aggressiveness 3 is highest
@@ -32,23 +25,20 @@ class AudioHandler:
         """This is called for each audio block."""
         if status:
             pass # Ignore overflows for now to avoid console spam
-        # We need 16-bit PCM for VAD and Vosk
+        # We need 16-bit PCM for VAD
         audio_data = (indata[:, 0] * 32767).astype(np.int16)
         self.audio_queue.put(audio_data)
 
-    def _record_until_silence(self, max_silence_duration=1.5):
+    def _record_until_silence(self, max_silence_duration=1.0):
         """Records audio until silence is detected, and transcribes locally."""
         frames = []
         silence_frames = 0
         is_speaking = False
         max_silence_chunks = int(max_silence_duration * self.RATE / self.CHUNK)
         
-        # Clear queue and recognizer before starting
+        # Clear queue before starting
         with self.audio_queue.mutex:
             self.audio_queue.queue.clear()
-            
-        # Reset the Kaldi recognizer so it doesn't carry over words from previous queries
-        self.recognizer = KaldiRecognizer(self.model, self.RATE)
             
         with sd.InputStream(samplerate=self.RATE, channels=self.CHANNELS, 
                             blocksize=self.CHUNK, callback=self._audio_callback):
@@ -64,12 +54,10 @@ class AudioHandler:
                     is_speaking = True
                     silence_frames = 0
                     frames.append(chunk)
-                    # Feed audio to the recognizer piece by piece
-                    self.recognizer.AcceptWaveform(chunk.tobytes())
+
                 elif is_speaking:
                     silence_frames += 1
                     frames.append(chunk)
-                    self.recognizer.AcceptWaveform(chunk.tobytes())
                     
                     if silence_frames > max_silence_chunks:
                         break # Stopped speaking
@@ -78,11 +66,10 @@ class AudioHandler:
                 if not is_speaking:
                     frames.append(chunk)
                     if len(frames) > int(0.5 * self.RATE / self.CHUNK): # Keep 0.5 seconds
-                        dropped_chunk = frames.pop(0)
-                    else:
-                        self.recognizer.AcceptWaveform(chunk.tobytes())
+                        frames.pop(0)
 
-        # Save to temporary WAV file
+        print("") # Clear the line after speaking
+        
         if not frames:
             return ""
             
@@ -93,38 +80,46 @@ class AudioHandler:
         if max_amplitude < 500:
              return ""
 
-        # Get final result form vosk
-        final_res = self.recognizer.FinalResult()
+        # Convert to float32 for Whisper (-1.0 to 1.0)
+        audio_data_f32 = audio_data.astype(np.float32) / 32768.0
+
+        print("\r[Whisper Thinking...]", end="", flush=True)
+        # Transcribe with faster-whisper
+        segments, info = self.model.transcribe(audio_data_f32, beam_size=1)
         
-        try:
-             text = json.loads(final_res).get("text", "")
-             return text.strip().lower()
-        except:
-             return ""
+        text = "".join([segment.text for segment in segments]).strip().lower()
+        if text:
+            print(f"\r[Whisper Heard]: {text}" + " " * 20)
+        return text
 
     def listen_for_wake_word(self):
-        """Continuously listens for the wake word using Vosk locally."""
+        """Listens for the wake word using faster-whisper."""
         print(f"\nListening for wake word: '{self.wake_word}'...")
+        
+        valid_wake_words = [
+            self.wake_word, 
+            "hey john", 
+            "hey jon",
+            "a john",
+            "he john",
+            "hey joan",
+            "hey joe",
+            "hey jaw",
+            "hey jaw.",
+            "hey john.",
+            "hey john?",
+            "hey john!"
+        ]
+        
         while True:
             text = self._record_until_silence(max_silence_duration=1.0)
-            if not text: continue
-            
-            print(f"[DEBUG] Local STT heard: '{text}'")
-            
-            # Check for the wake word or very common transcription errors
-            valid_wake_words = [
-                self.wake_word, 
-                "hey answer", 
-                "a answer",
-                "hey and far",
-                "hey and sir",
-                "hey insar",
-                "a insar"
-            ]
-            
-            if any(ww in text for ww in valid_wake_words):
-                print("Wake word detected!")
-                return True
+            if not text:
+                continue
+
+            for ww in valid_wake_words:
+                if ww in text:
+                    print(f"\n[DEBUG] Wake word detected: '{text}'!")
+                    return True
 
     def listen_for_query(self) -> str:
         """Listens for the user's query after the wake word is detected."""
@@ -133,6 +128,7 @@ class AudioHandler:
         
         if text:
             print(f"User query: {text}")
+            # Strip punctuation for cleaner passing to LLM (optional, but good for Whisper)
             return text
         else:
             print("Could not understand the query.")

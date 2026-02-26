@@ -9,7 +9,7 @@ from llm_handler import LLMHandler
 from tts_handler import TTSHandler
 
 def main():
-    print("Initializing Ansar AI Assistant...")
+    print("Initializing John AI Assistant...")
     
     if not os.getenv("GEMINI_API_KEY"):
          print("Error: GEMINI_API_KEY environment variable not found.")
@@ -17,14 +17,14 @@ def main():
          return
 
     try:
-        audio = AudioHandler(wake_word="hey ansar")
+        audio = AudioHandler(wake_word="hey john")
         llm = LLMHandler()
-        tts = TTSHandler(voice="en-US-AriaNeural") # Default a professional female voice
+        tts = TTSHandler(voice="af_heart") # Default a professional female voice
     except Exception as e:
         print(f"Failed to initialize components: {e}")
         return
 
-    print("\nAnsar is ready! Say 'Hey Ansar' to start a conversation.\n")
+    print("\nJohn is ready! Say 'Hey John' to start a conversation.\n")
     
     while True:
         try:
@@ -47,7 +47,7 @@ def main():
                     print("No query detected. Going back to listening for wake word.")
                     
         except KeyboardInterrupt:
-             print("\nExiting Ansar AI Assistant. Goodbye!")
+             print("\nExiting John AI Assistant. Goodbye!")
              break
         except Exception as e:
             print(f"An unexpected error occurred in the main loop: {e}")
