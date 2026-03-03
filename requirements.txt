@@ -1,9 +1,8 @@
 google-genai==0.3.0
-SpeechRecognition==3.11.0
-pyaudio==0.2.14
+SpeechRecognition
 kokoro-onyx
 sounddevice
 numpy
-faster-whisper
 webrtcvad
 python-dotenv==1.0.1
+pynput
