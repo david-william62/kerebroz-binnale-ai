@@ -2,7 +2,6 @@ import os
 import threading
 from dotenv import load_dotenv
 
-# Load environment variables from .env file FIRST
 load_dotenv()
 
 from audio_handler import AudioHandler
@@ -10,13 +9,12 @@ from llm_handler import LLMHandler
 from tts_handler import TTSHandler
 from hotkey_handler import HotkeyHandler
 
-# ─── Phrases that end the conversation session ────────────────────────────────
+# ─── Farewell phrases ─────────────────────────────────────────────────────────
 FAREWELL_PHRASES = [
     "goodbye john", "goodbye, john", "bye john", "bye, john",
     "see you john", "see you later john", "that's all john",
     "thank you john", "thanks john", "stop john",
 ]
-
 FAREWELL_RESPONSE = "Goodbye! It was a pleasure talking with you. Call me anytime."
 
 
@@ -29,75 +27,85 @@ def main():
     print("Initializing John AI Assistant...")
 
     if not os.getenv("GEMINI_API_KEY"):
-        print("Error: GEMINI_API_KEY environment variable not found.")
-        print("Please create a .env file and add your GEMINI_API_KEY.")
+        print("Error: GEMINI_API_KEY not found. Add it to your .env file.")
         return
 
     try:
         audio  = AudioHandler(wake_word="hey john")
         llm    = LLMHandler()
         tts    = TTSHandler(voice="af_heart")
-        hotkey = HotkeyHandler()   # reads WAKE_KEY / SLEEP_KEY from .env
+        hotkey = HotkeyHandler()
     except Exception as e:
-        print(f"Failed to initialize components: {e}")
+        print(f"Failed to initialize: {e}")
         return
 
-    # Start hotkey listener in background
     hotkey.start()
 
-    print("\n┌─────────────────────────────────────────────┐")
-    print("│            John AI Assistant Ready           │")
-    print("├─────────────────────────────────────────────┤")
-    print("│  Say  'Hey John'     OR press F9   to wake  │")
-    print("│  Say  'Goodbye John' OR press F10  to sleep │")
-    print("│  Press Ctrl+C to quit                       │")
-    print("└─────────────────────────────────────────────┘\n")
+    print("\n┌─────────────────────────────────────────────────┐")
+    print("│            John AI Assistant Ready             │")
+    print("├─────────────────────────────────────────────────┤")
+    print("│  Say  'Hey John'     OR press SPACE  to wake    │")
+    print("│  Say  'Goodbye John' OR press ENTER  to sleep   │")
+    print("│  Press Ctrl+C to quit                           │")
+    print("└─────────────────────────────────────────────────┘\n")
 
-    # ── Shared: wake trigger (set by wake word OR hotkey) ──────────────────
+    # ── wake_event: fired by wake word OR wake key ────────────────────────────
     wake_event = threading.Event()
 
+    # ── Wake word thread: runs in background, fires wake_event on match ───────
     def wake_word_thread():
-        """Continuously listen for wake word and fire wake_event."""
         while True:
-            audio.listen_for_wake_word()
-            wake_event.set()
+            matched = audio.listen_for_wake_word()   # False when cancelled
+            if matched:
+                wake_event.set()
 
-    ww_thread = threading.Thread(target=wake_word_thread, daemon=True, name="WakeWord")
-    ww_thread.start()
+    threading.Thread(target=wake_word_thread, daemon=True, name="WakeWord").start()
+
+    # ── Hotkey watcher: space pressed → cancel mic instantly → set wake_event ─
+    def hotkey_watcher():
+        while True:
+            hotkey.wake_pressed.wait()       # zero-CPU block
+            hotkey.clear_wake()
+            print("[Hotkey] Wake key — interrupting mic listener...")
+            audio.cancel_event.set()         # abort listen_for_wake_word NOW
+            wake_event.set()                 # unblock standby immediately
+
+    threading.Thread(target=hotkey_watcher, daemon=True, name="HotkeyWatcher").start()
 
     # ─────────────────────────────────────────────────────────────────────────
-    #  Main loop
+    #  Main loop — two states: STANDBY and SESSION
     # ─────────────────────────────────────────────────────────────────────────
     try:
         while True:
-            # ── Standby: wait for wake word  OR  F9 hotkey ────────────────
-            print("\n[Standby — say 'Hey John' or press F9 to begin]")
 
-            while True:
-                # Check hotkey first (non-blocking)
-                if hotkey.wake_pressed.is_set():
-                    hotkey.clear_wake()
-                    print("[Hotkey] Waking up via key press.")
-                    wake_event.set()
+            # ══════════════════════════════════════════════════════════════════
+            #  STANDBY  — mic active, both wake word and SPACE watched
+            # ══════════════════════════════════════════════════════════════════
+            hotkey.clear_wake()
+            hotkey.clear_sleep()
+            audio.cancel_event.clear()       # let the wake-word thread run
+            wake_event.clear()
 
-                if wake_event.is_set():
-                    wake_event.clear()
-                    break
+            print("\n[Standby — say 'Hey John' or press SPACE to begin]")
+            wake_event.wait()                # block until woken by either path
 
-                # Small sleep to avoid busy-wait
-                threading.Event().wait(0.1)
+            # Stop mic immediately; wait for any in-progress listen to release it
+            audio.cancel_event.set()
+            with audio.mic_lock:
+                pass                         # ensures mic is fully free before query mode
 
-            # ── Greet ─────────────────────────────────────────────────────
+            # ══════════════════════════════════════════════════════════════════
+            #  SESSION  — query mode, ENTER key ends the session
+            # ══════════════════════════════════════════════════════════════════
+            hotkey.clear_sleep()
             tts.process_llm_stream(iter(["Yes? How can I help you?"]))
-
-            # ── Conversation loop ──────────────────────────────────────────
-            print("\n[Session started — say 'Goodbye John' or press F10 to end]\n")
+            print("\n[Session — say 'Goodbye John' or press ENTER to end]\n")
 
             while True:
-                # Check sleep hotkey before listening
+                # Check sleep key first (immediate exit, no waiting for mic)
                 if hotkey.sleep_pressed.is_set():
                     hotkey.clear_sleep()
-                    print("[Hotkey] Sleep key pressed — ending session.")
+                    print("[Sleep key] Ending session.")
                     tts.process_llm_stream(iter([FAREWELL_RESPONSE]))
                     print("\n[Session ended — returning to standby]\n")
                     break
@@ -105,7 +113,6 @@ def main():
                 query = audio.listen_for_query()
 
                 if not query:
-                    # Check sleep hotkey again after timeout
                     if hotkey.sleep_pressed.is_set():
                         hotkey.clear_sleep()
                         tts.process_llm_stream(iter([FAREWELL_RESPONSE]))
@@ -114,14 +121,12 @@ def main():
                     print("(Didn't catch that — still listening...)")
                     continue
 
-                # Farewell via voice
                 if _is_farewell(query):
                     print(f"[Farewell detected: '{query}']")
                     tts.process_llm_stream(iter([FAREWELL_RESPONSE]))
                     print("\n[Session ended — returning to standby]\n")
                     break
 
-                # Normal query → LLM → TTS
                 response_stream = llm.generate_response_stream(query)
                 tts.process_llm_stream(response_stream)
 

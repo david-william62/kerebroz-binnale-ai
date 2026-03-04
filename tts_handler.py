@@ -1,9 +1,13 @@
+import os
 import threading
 import queue
 import re
 import numpy as np
 import sounddevice as sd
 from kokoro_onnx import Kokoro as KokoroTTS
+
+# Resolve paths relative to this file so the script works from any cwd
+_HERE = os.path.dirname(os.path.abspath(__file__))
 
 class TTSHandler:
     def __init__(self, voice="af_heart", speed=1.0, sample_rate=24000):
@@ -16,8 +20,11 @@ class TTSHandler:
         self.is_playing = False
         self.play_thread = None
 
-        print("Loading Kokoro TTS model...")
-        self.tts = KokoroTTS("venv/models/model.onnx","venv/voices/voices.bin")
+        model_path  = os.path.join(_HERE, "ai", "models", "kokoro-v1.0.int8.onnx")
+        voices_path = os.path.join(_HERE, "ai", "models", "voices", "voices-v1.0.bin")
+
+        print(f"Loading Kokoro TTS model...")
+        self.tts = KokoroTTS(model_path, voices_path)
         print("Kokoro TTS model loaded.")
 
     def process_llm_stream(self, response_stream):
